@@ -109,7 +109,8 @@ def start_bot():
             stderr=subprocess.STDOUT,
             bufsize=1,
             universal_newlines=False,
-            env=os.environ.copy()
+            env=os.environ.copy(),
+            cwd=bot_dir
         )
         output_thread = threading.Thread(target=capture_bot_output, args=(bot_process,))
         output_thread.daemon = True
@@ -149,10 +150,10 @@ def stop_bot():
 
 @app.route('/bot_status', methods=['GET'])
 def get_bot_status():
-    """Return the current bot status and last few lines of output."""
+    """Return the current bot status and recent output lines."""
     return jsonify({
         'status': bot_status,
-        'output': bot_output[-10:] if bot_output else []
+        'output': bot_output[-50:] if bot_output else []
     })
 
 if __name__ == '__main__':

@@ -25,9 +25,17 @@ logger = logging.getLogger(__name__)
 # Get tokens from environment variables
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-ASSISTANT_ID = os.getenv("ASSISTANT_ID")  # Your pre-configured OpenAI Assistant ID
+ASSISTANT_ID = os.getenv("ASSISTANT_ID")
 
-# Initialize OpenAI client
+# Validate required tokens at startup
+if not TELEGRAM_TOKEN:
+    raise ValueError("TELEGRAM_TOKEN environment variable is not set.")
+if not OPENAI_API_KEY:
+    raise ValueError("OPENAI_API_KEY environment variable is not set.")
+if not ASSISTANT_ID:
+    raise ValueError("ASSISTANT_ID environment variable is not set.")
+
+# Initialize OpenAI client (after validation)
 client = openai.OpenAI(api_key=OPENAI_API_KEY)
 
 # Store violation counts and temporary bans
@@ -209,7 +217,7 @@ async def get_assistant_response(query: str) -> str:
                 return "Sorry, I encountered an error while processing your request."
             elif run_status.status == "expired":
                 return "The request took too long to process. Please try again."
-            time.sleep(1)
+            await asyncio.sleep(1)
 
         # Get the messages
         messages = client.beta.threads.messages.list(
