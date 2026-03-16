@@ -1,0 +1,870 @@
+import os
+import logging
+import re
+import time
+from datetime import datetime, timedelta
+from dotenv import load_dotenv
+from telegram import Update
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram.constants import ChatMemberStatus
+import openai
+import json
+from collections import defaultdict
+
+# Load environment variables
+load_dotenv()
+
+# Configure logging
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
+
+# Get tokens from environment variables
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+ASSISTANT_ID = os.getenv("ASSISTANT_ID")  # Your pre-configured OpenAI Assistant ID
+
+# Initialize OpenAI client
+client = openai.OpenAI(api_key=OPENAI_API_KEY)
+
+# Store violation counts and temporary bans
+violation_counts = defaultdict(int)
+temp_banned_users = {}  # user_id: unban_time
+
+# Define moderation patterns
+HATE_WORDS_PATTERN = re.compile(r'\b(hate|slur|offensive content|racist|sexist)\b', re.IGNORECASE)
+SPAM_PATTERN = re.compile(r'(buy now|click here|limited offer|\$\$\$|earn money fast)', re.IGNORECASE)
+LINK_PATTERN = re.compile(r'(https?://\S+|www\.\S+|\S+\.\S+/\S+)', re.IGNORECASE)
+
+# File to store violation data
+VIOLATIONS_FILE = "violations.json"
+
+
+def load_violations():
+    """Load violation data from file"""
+    global violation_counts, temp_banned_users
+    try:
+        if os.path.exists(VIOLATIONS_FILE):
+            with open(VIOLATIONS_FILE, 'r') as f:
+                data = json.load(f)
+                violation_counts = defaultdict(int, data.get('violation_counts', {}))
+                temp_banned_users = {int(k): v for k, v in data.get('temp_banned_users', {}).items()}
+    except Exception as e:
+        logger.error(f"Error loading violations data: {e}")
+
+
+def save_violations():
+    """Save violation data to file"""
+    try:
+        data = {
+            'violation_counts': dict(violation_counts),
+            'temp_banned_users': temp_banned_users
+        }
+        with open(VIOLATIONS_FILE, 'w') as f:
+            json.dump(data, f)
+    except Exception as e:
+        logger.error(f"Error saving violations data: {e}")
+
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Send a welcome message when the command /start is issued."""
+    await update.message.reply_text(
+        "👋 Hello! I'm your group's AI moderator and assistant. "
+        "I can answer questions and enforce the group rules."
+    )
+
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Send a help message when the command /help is issued."""
+    # Check if this is a private chat or group
+    is_private = update.message.chat.type == "private"
+
+    # Basic commands for all users
+    help_text = (
+        "🤖 *Bot Commands:*\n"
+        "/start - Start the bot\n"
+        "/help - Show this help message\n"
+        "/rules - Display group rules\n"
+        "/violations - Check your violation count\n\n"
+        "📝 *Features:*\n"
+        "• Ask me any question and I'll respond using AI\n"
+        "• I automatically moderate messages based on group rules\n\n"
+        "⚠️ *Group Rules:*\n"
+        "1. No spam messages\n"
+        "2. No external links\n"
+        "3. No hate speech or offensive content\n\n"
+        "🚫 *Violation Policy:*\n"
+        "• 3 violations: Banned for 24 hours\n"
+        "• 5 violations: Permanently banned"
+    )
+
+    # Add admin commands if in private chat or user is admin in group
+    if is_private:
+        admin_text = (
+            "\n\n👮‍♂️ *Admin Commands:*\n"
+            "/ban @username [reason] - Ban user permanently\n"
+            "/tempban @username [hours] [reason] - Ban for specific hours\n"
+            "/unban @username - Unban a user\n"
+            "/warn @username [reason] - Add violation to user\n"
+            "/unwarn @username - Remove one violation\n"
+            "/reset @username - Reset all violations\n"
+            "/stats - Show group statistics"
+        )
+        help_text += admin_text
+    else:
+        # Only check admin status if in a group
+        try:
+            user_id = update.message.from_user.id
+            chat_id = update.message.chat.id
+
+            chat_member = await context.bot.get_chat_member(chat_id, user_id)
+            if chat_member.status in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR]:
+                admin_text = (
+                    "\n\n👮‍♂️ *Admin Commands:*\n"
+                    "/ban @username [reason] - Ban user permanently\n"
+                    "/tempban @username [hours] [reason] - Ban for specific hours\n"
+                    "/unban @username - Unban a user\n"
+                    "/warn @username [reason] - Add violation to user\n"
+                    "/unwarn @username - Remove one violation\n"
+                    "/reset @username - Reset all violations\n"
+                    "/stats - Show group statistics"
+                )
+                help_text += admin_text
+        except Exception as e:
+            logger.error(f"Error checking admin status: {e}")
+
+    await update.message.reply_text(help_text, parse_mode="Markdown")
+
+
+async def rules_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Display the group rules when /rules is issued."""
+    rules_text = (
+        "📜 *Group Rules:*\n\n"
+        "1. *No spam messages*\n"
+        "   - No repetitive content\n"
+        "   - No promotional material\n\n"
+        "2. *No external links*\n"
+        "   - No URLs or website references\n"
+        "   - No social media links\n\n"
+        "3. *No hate speech or offensive content*\n"
+        "   - Be respectful to all members\n"
+        "   - No discriminatory language\n\n"
+        "🚫 *Consequences:*\n"
+        "• 3 violations: Banned for 24 hours\n"
+        "• 5 violations: Permanently banned"
+    )
+    await update.message.reply_text(rules_text, parse_mode="Markdown")
+
+
+async def violations_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show a user their violation count."""
+    user_id = update.message.from_user.id
+    count = violation_counts[str(user_id)]
+
+    if count == 0:
+        message = "You have no rule violations. Thank you for being a good community member! 👍"
+    else:
+        warning = ""
+        if count >= 3:
+            warning = "\n⚠️ Your next violation will result in a 24-hour ban!"
+        if count >= 4:
+            warning = "\n⚠️ Your next violation will result in a permanent ban!"
+
+        message = f"You currently have {count} rule violation(s).{warning}"
+
+    await update.message.reply_text(message)
+
+
+async def get_assistant_response(query: str) -> str:
+    """Get a response from your pre-configured OpenAI Assistant."""
+    try:
+        # Create a thread
+        thread = client.beta.threads.create()
+
+        # Add the user's message to the thread
+        client.beta.threads.messages.create(
+            thread_id=thread.id,
+            role="user",
+            content=query
+        )
+
+        # Run the Assistant on the thread
+        run = client.beta.threads.runs.create(
+            thread_id=thread.id,
+            assistant_id=ASSISTANT_ID
+        )
+
+        # Wait for the run to complete
+        while True:
+            run_status = client.beta.threads.runs.retrieve(
+                thread_id=thread.id,
+                run_id=run.id
+            )
+            if run_status.status == "completed":
+                break
+            time.sleep(1)
+
+        # Get the messages
+        messages = client.beta.threads.messages.list(
+            thread_id=thread.id
+        )
+
+        # Find the assistant's response (should be the last message)
+        for message in messages.data:
+            if message.role == "assistant":
+                # Access the message content which is now a list of content parts
+                for content_part in message.content:
+                    if content_part.type == "text":
+                        return content_part.text.value
+
+        return "I processed your request but couldn't generate a proper response."
+    except Exception as e:
+        logger.error(f"Error getting assistant response: {e}")
+        return "Sorry, I'm having trouble processing your request right now."
+
+
+async def check_and_enforce_bans(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Check for expired temporary bans and update the records."""
+    current_time = datetime.now().timestamp()
+    users_to_unban = []
+
+    for user_id, unban_time in temp_banned_users.items():
+        if current_time >= unban_time:
+            users_to_unban.append(user_id)
+
+    for user_id in users_to_unban:
+        # Remove from temp ban list but keep violation count
+        temp_banned_users.pop(str(user_id), None)
+
+    if users_to_unban:
+        save_violations()
+
+
+async def record_violation(update: Update, context: ContextTypes.DEFAULT_TYPE, violation_type: str) -> bool:
+    """Record a user violation and take appropriate action."""
+    user_id = str(update.message.from_user.id)
+    username = update.message.from_user.username or "Unknown"
+
+    # Increment violation count
+    violation_counts[user_id] += 1
+    count = violation_counts[user_id]
+
+    # Save updated violation data
+    save_violations()
+
+    # Delete the violating message
+    await context.bot.delete_message(
+        chat_id=update.message.chat_id,
+        message_id=update.message.message_id
+    )
+
+    # Determine action based on violation count
+    if count >= 5:
+        # Permanent ban
+        try:
+            await context.bot.ban_chat_member(
+                chat_id=update.message.chat_id,
+                user_id=int(user_id)
+            )
+            await context.bot.send_message(
+                chat_id=update.message.chat_id,
+                text=f"⛔ @{username} has been permanently banned after 5 violations."
+            )
+            logger.info(f"User {user_id} permanently banned after 5 violations")
+        except Exception as e:
+            logger.error(f"Failed to ban user {user_id}: {e}")
+            await update.message.reply_text(
+                "⚠️ Failed to ban user. Please check if I have admin privileges."
+            )
+        return True
+
+    elif count >= 3:
+        # Temporary 24-hour ban (only if not already banned)
+        if user_id not in temp_banned_users:
+            try:
+                # Ban for 24 hours
+                until_date = datetime.now() + timedelta(days=1)
+                await context.bot.ban_chat_member(
+                    chat_id=update.message.chat_id,
+                    user_id=int(user_id),
+                    until_date=until_date
+                )
+
+                # Record the unban time
+                temp_banned_users[user_id] = until_date.timestamp()
+                save_violations()
+
+                await context.bot.send_message(
+                    chat_id=update.message.chat_id,
+                    text=f"⏳ @{username} has been banned for 24 hours after 3 violations."
+                )
+                logger.info(f"User {user_id} temporarily banned for 24 hours")
+            except Exception as e:
+                logger.error(f"Failed to temp ban user {user_id}: {e}")
+                await update.message.reply_text(
+                    "⚠️ Failed to ban user. Please check if I have admin privileges."
+                )
+        return True
+    else:
+        # Just a warning
+        await context.bot.send_message(
+            chat_id=update.message.chat_id,
+            text=f"⚠️ @{username}, your message was removed for containing {violation_type}. "
+                 f"You now have {count} violation(s). "
+                 f"At 3 violations you will be banned for 24 hours, and at 5 you will be permanently banned."
+        )
+        return False
+
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle incoming messages: moderate content and respond to questions."""
+    if not update.message or not update.message.text:
+        return
+
+    # Skip processing messages from the bot itself
+    if update.message.from_user.id == context.bot.id:
+        return
+
+    # Check if user is in a group/supergroup
+    if update.message.chat.type in ["group", "supergroup"]:
+        # Check for rule violations
+        message_text = update.message.text
+
+        # Check for hate speech
+        if HATE_WORDS_PATTERN.search(message_text):
+            await record_violation(update, context, "hate speech")
+            return
+
+        # Check for spam
+        if SPAM_PATTERN.search(message_text):
+            await record_violation(update, context, "spam content")
+            return
+
+        # Check for links
+        if LINK_PATTERN.search(message_text):
+            await record_violation(update, context, "an external link")
+            return
+
+        # Check if the message is directed at the bot (by mention or reply)
+        bot_mentioned = False
+        if update.message.text and ("@" + context.bot.username) in update.message.text:
+            bot_mentioned = True
+            query = update.message.text.replace("@" + context.bot.username, "").strip()
+        elif update.message.reply_to_message and update.message.reply_to_message.from_user.id == context.bot.id:
+            bot_mentioned = True
+            query = update.message.text.strip()
+
+        if bot_mentioned:
+            # If bot is directly addressed, provide AI response
+            response = await get_assistant_response(query)
+            await update.message.reply_text(response)
+    else:
+        # In private chat, always respond with AI
+        response = await get_assistant_response(update.message.text)
+        await update.message.reply_text(response)
+
+
+async def ban_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Ban a user from the group."""
+    # Check if user is admin
+    user_id = update.message.from_user.id
+    chat_id = update.message.chat.id
+
+    try:
+        chat_member = await context.bot.get_chat_member(chat_id, user_id)
+        if chat_member.status not in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR]:
+            await update.message.reply_text("⛔ This command is only available to administrators.")
+            return
+    except Exception as e:
+        logger.error(f"Error checking admin status: {e}")
+        await update.message.reply_text("⚠️ Error verifying your admin privileges.")
+        return
+
+    # Check if command has arguments
+    if not context.args:
+        await update.message.reply_text("⚠️ Usage: /ban @username [reason]")
+        return
+
+    # Get target username and reason
+    target_username = context.args[0].replace("@", "")
+    reason = " ".join(context.args[1:]) if len(context.args) > 1 else "No reason provided"
+
+    try:
+        # Get chat members to find user ID by username
+        target_user = None
+        async for member in context.bot.get_chat_members(chat_id):
+            if member.user.username == target_username:
+                target_user = member.user
+                break
+
+        if not target_user:
+            await update.message.reply_text(f"⚠️ User @{target_username} not found in this group.")
+            return
+
+        # Prevent banning admins
+        target_status = (await context.bot.get_chat_member(chat_id, target_user.id)).status
+        if target_status in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR]:
+            await update.message.reply_text("⚠️ Cannot ban administrators.")
+            return
+
+        # Ban the user
+        await context.bot.ban_chat_member(chat_id, target_user.id)
+
+        # Set violation count to max
+        violation_counts[str(target_user.id)] = 5
+        save_violations()
+
+        await update.message.reply_text(
+            f"🚫 @{target_username} has been permanently banned.\n"
+            f"Reason: {reason}"
+        )
+        logger.info(f"User {target_username} ({target_user.id}) banned by admin {update.message.from_user.username}")
+
+    except Exception as e:
+        logger.error(f"Error banning user: {e}")
+        await update.message.reply_text("⚠️ Failed to ban user. Please check if I have admin privileges.")
+
+
+async def tempban_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Temporarily ban a user from the group."""
+    # Check if user is admin
+    user_id = update.message.from_user.id
+    chat_id = update.message.chat.id
+
+    try:
+        chat_member = await context.bot.get_chat_member(chat_id, user_id)
+        if chat_member.status not in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR]:
+            await update.message.reply_text("⛔ This command is only available to administrators.")
+            return
+    except Exception as e:
+        logger.error(f"Error checking admin status: {e}")
+        await update.message.reply_text("⚠️ Error verifying your admin privileges.")
+        return
+
+    # Check if command has arguments
+    if len(context.args) < 2:
+        await update.message.reply_text("⚠️ Usage: /tempban @username [hours] [reason]")
+        return
+
+    # Get target username, hours, and reason
+    target_username = context.args[0].replace("@", "")
+
+    try:
+        hours = float(context.args[1])
+        if hours <= 0:
+            await update.message.reply_text("⚠️ Ban duration must be positive.")
+            return
+    except ValueError:
+        await update.message.reply_text("⚠️ Ban duration must be a number (in hours).")
+        return
+
+    reason = " ".join(context.args[2:]) if len(context.args) > 2 else "No reason provided"
+
+    try:
+        # Get chat members to find user ID by username
+        target_user = None
+        async for member in context.bot.get_chat_members(chat_id):
+            if member.user.username == target_username:
+                target_user = member.user
+                break
+
+        if not target_user:
+            await update.message.reply_text(f"⚠️ User @{target_username} not found in this group.")
+            return
+
+        # Prevent banning admins
+        target_status = (await context.bot.get_chat_member(chat_id, target_user.id)).status
+        if target_status in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR]:
+            await update.message.reply_text("⚠️ Cannot ban administrators.")
+            return
+
+        # Calculate ban duration
+        until_date = datetime.now() + timedelta(hours=hours)
+
+        # Ban the user
+        await context.bot.ban_chat_member(chat_id, target_user.id, until_date=until_date)
+
+        # Record in temp banned users
+        temp_banned_users[str(target_user.id)] = until_date.timestamp()
+        save_violations()
+
+        # Format ban duration nicely
+        if hours < 1:
+            minutes = int(hours * 60)
+            duration_text = f"{minutes} minute(s)"
+        elif hours == 1:
+            duration_text = "1 hour"
+        elif hours < 24:
+            duration_text = f"{int(hours)} hours"
+        elif hours == 24:
+            duration_text = "1 day"
+        else:
+            days = int(hours / 24)
+            remaining_hours = int(hours % 24)
+            duration_text = f"{days} day(s)"
+            if remaining_hours > 0:
+                duration_text += f" and {remaining_hours} hour(s)"
+
+        await update.message.reply_text(
+            f"⏳ @{target_username} has been banned for {duration_text}.\n"
+            f"Reason: {reason}"
+        )
+        logger.info(
+            f"User {target_username} ({target_user.id}) temp banned for {hours} hours by admin {update.message.from_user.username}")
+
+    except Exception as e:
+        logger.error(f"Error temp banning user: {e}")
+        await update.message.reply_text("⚠️ Failed to ban user. Please check if I have admin privileges.")
+
+
+async def unban_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Unban a user from the group."""
+    # Check if user is admin
+    user_id = update.message.from_user.id
+    chat_id = update.message.chat.id
+
+    try:
+        chat_member = await context.bot.get_chat_member(chat_id, user_id)
+        if chat_member.status not in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR]:
+            await update.message.reply_text("⛔ This command is only available to administrators.")
+            return
+    except Exception as e:
+        logger.error(f"Error checking admin status: {e}")
+        await update.message.reply_text("⚠️ Error verifying your admin privileges.")
+        return
+
+    # Check if command has arguments
+    if not context.args:
+        await update.message.reply_text("⚠️ Usage: /unban @username")
+        return
+
+    # Get target username
+    target_username = context.args[0].replace("@", "")
+
+    try:
+        # Get chat members to find user ID by username
+        target_user = None
+        # Need to search banned users specifically
+        async for member in context.bot.get_chat_administrators(chat_id):
+            if member.user.username == target_username:
+                target_user = member.user
+                break
+
+        # If user wasn't found in admins, they might be banned
+        # We would need an additional way to look up banned users by username
+        # This is a limitation of Telegram Bot API
+
+        if not target_user:
+            # Try another approach - ask admin to provide user ID if possible
+            await update.message.reply_text(
+                f"⚠️ User @{target_username} not found. If you know their user ID, "
+                f"use /unban_id [user_id] instead."
+            )
+            return
+
+        # Unban the user
+        await context.bot.unban_chat_member(chat_id, target_user.id)
+
+        # Remove from temp banned if present
+        temp_banned_users.pop(str(target_user.id), None)
+        save_violations()
+
+        await update.message.reply_text(f"✅ @{target_username} has been unbanned.")
+        logger.info(f"User {target_username} unbanned by admin {update.message.from_user.username}")
+
+    except Exception as e:
+        logger.error(f"Error unbanning user: {e}")
+        await update.message.reply_text("⚠️ Failed to unban user. Please check if I have admin privileges.")
+
+
+async def warn_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Warn a user and add to their violation count."""
+    # Check if user is admin
+    user_id = update.message.from_user.id
+    chat_id = update.message.chat.id
+
+    try:
+        chat_member = await context.bot.get_chat_member(chat_id, user_id)
+        if chat_member.status not in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR]:
+            await update.message.reply_text("⛔ This command is only available to administrators.")
+            return
+    except Exception as e:
+        logger.error(f"Error checking admin status: {e}")
+        await update.message.reply_text("⚠️ Error verifying your admin privileges.")
+        return
+
+    # Check if command has arguments
+    if not context.args:
+        await update.message.reply_text("⚠️ Usage: /warn @username [reason]")
+        return
+
+    # Get target username and reason
+    target_username = context.args[0].replace("@", "")
+    reason = " ".join(context.args[1:]) if len(context.args) > 1 else "No reason provided"
+
+    try:
+        # Get chat members to find user ID by username
+        target_user = None
+        async for member in context.bot.get_chat_members(chat_id):
+            if member.user.username == target_username:
+                target_user = member.user
+                break
+
+        if not target_user:
+            await update.message.reply_text(f"⚠️ User @{target_username} not found in this group.")
+            return
+
+        # Prevent warning admins
+        target_status = (await context.bot.get_chat_member(chat_id, target_user.id)).status
+        if target_status in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR]:
+            await update.message.reply_text("⚠️ Cannot warn administrators.")
+            return
+
+        # Increment violation count
+        target_id = str(target_user.id)
+        violation_counts[target_id] = violation_counts[target_id] + 1
+        count = violation_counts[target_id]
+        save_violations()
+
+        # Determine if action is needed based on count
+        action_text = ""
+        if count >= 5:
+            # Permanent ban
+            await context.bot.ban_chat_member(chat_id, target_user.id)
+            action_text = "This user has been permanently banned."
+        elif count >= 3:
+            # Temporary 24-hour ban
+            until_date = datetime.now() + timedelta(days=1)
+            await context.bot.ban_chat_member(chat_id, target_user.id, until_date=until_date)
+            temp_banned_users[target_id] = until_date.timestamp()
+            save_violations()
+            action_text = "This user has been banned for 24 hours."
+
+        await update.message.reply_text(
+            f"⚠️ @{target_username} has been warned by admin.\n"
+            f"Reason: {reason}\n"
+            f"Current violations: {count}/5\n"
+            f"{action_text}"
+        )
+        logger.info(
+            f"User {target_username} warned by admin {update.message.from_user.username}, now at {count} violations")
+
+    except Exception as e:
+        logger.error(f"Error warning user: {e}")
+        await update.message.reply_text("⚠️ Failed to warn user.")
+
+
+async def unwarn_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Remove one violation from a user's count."""
+    # Check if user is admin
+    user_id = update.message.from_user.id
+    chat_id = update.message.chat.id
+
+    try:
+        chat_member = await context.bot.get_chat_member(chat_id, user_id)
+        if chat_member.status not in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR]:
+            await update.message.reply_text("⛔ This command is only available to administrators.")
+            return
+    except Exception as e:
+        logger.error(f"Error checking admin status: {e}")
+        await update.message.reply_text("⚠️ Error verifying your admin privileges.")
+        return
+
+    # Check if command has arguments
+    if not context.args:
+        await update.message.reply_text("⚠️ Usage: /unwarn @username")
+        return
+
+    # Get target username
+    target_username = context.args[0].replace("@", "")
+
+    try:
+        # Get chat members to find user ID by username
+        target_user = None
+        async for member in context.bot.get_chat_members(chat_id):
+            if member.user.username == target_username:
+                target_user = member.user
+                break
+
+        if not target_user:
+            await update.message.reply_text(f"⚠️ User @{target_username} not found in this group.")
+            return
+
+        # Decrement violation count
+        target_id = str(target_user.id)
+        if target_id in violation_counts and violation_counts[target_id] > 0:
+            violation_counts[target_id] -= 1
+            count = violation_counts[target_id]
+            save_violations()
+
+            await update.message.reply_text(
+                f"✅ One violation has been removed from @{target_username}.\n"
+                f"Current violations: {count}/5"
+            )
+            logger.info(
+                f"One violation removed from user {target_username} by admin {update.message.from_user.username}, now at {count}")
+        else:
+            await update.message.reply_text(f"✅ @{target_username} has no violations to remove.")
+
+    except Exception as e:
+        logger.error(f"Error unwarning user: {e}")
+        await update.message.reply_text("⚠️ Failed to remove warning.")
+
+
+async def reset_violations_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Reset all violations for a user."""
+    # Check if user is admin
+    user_id = update.message.from_user.id
+    chat_id = update.message.chat.id
+
+    try:
+        chat_member = await context.bot.get_chat_member(chat_id, user_id)
+        if chat_member.status not in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR]:
+            await update.message.reply_text("⛔ This command is only available to administrators.")
+            return
+    except Exception as e:
+        logger.error(f"Error checking admin status: {e}")
+        await update.message.reply_text("⚠️ Error verifying your admin privileges.")
+        return
+
+    # Check if command has arguments
+    if not context.args:
+        await update.message.reply_text("⚠️ Usage: /reset @username")
+        return
+
+    # Get target username
+    target_username = context.args[0].replace("@", "")
+
+    try:
+        # Get chat members to find user ID by username
+        target_user = None
+        async for member in context.bot.get_chat_members(chat_id):
+            if member.user.username == target_username:
+                target_user = member.user
+                break
+
+        if not target_user:
+            await update.message.reply_text(f"⚠️ User @{target_username} not found in this group.")
+            return
+
+        # Reset violation count
+        target_id = str(target_user.id)
+        if target_id in violation_counts and violation_counts[target_id] > 0:
+            old_count = violation_counts[target_id]
+            violation_counts[target_id] = 0
+            save_violations()
+
+            await update.message.reply_text(
+                f"🔄 All violations have been reset for @{target_username}.\n"
+                f"Previous violations: {old_count}/5\n"
+                f"Current violations: 0/5"
+            )
+            logger.info(f"All violations reset for user {target_username} by admin {update.message.from_user.username}")
+        else:
+            await update.message.reply_text(f"✅ @{target_username} already has no violations.")
+
+    except Exception as e:
+        logger.error(f"Error resetting violations: {e}")
+        await update.message.reply_text("⚠️ Failed to reset violations.")
+
+
+async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show group statistics."""
+    # Check if user is admin
+    user_id = update.message.from_user.id
+    chat_id = update.message.chat.id
+
+    try:
+        chat_member = await context.bot.get_chat_member(chat_id, user_id)
+        if chat_member.status not in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR]:
+            await update.message.reply_text("⛔ This command is only available to administrators.")
+            return
+    except Exception as e:
+        logger.error(f"Error checking admin status: {e}")
+        await update.message.reply_text("⚠️ Error verifying your admin privileges.")
+        return
+
+    try:
+        # Get group information
+        chat = await context.bot.get_chat(chat_id)
+
+        # Count members
+        member_count = await context.bot.get_chat_member_count(chat_id)
+
+        # Count violations
+        total_violations = sum(violation_counts.values())
+        users_with_violations = len([u for u, c in violation_counts.items() if c > 0])
+        temp_banned_count = len(temp_banned_users)
+
+        # Format stats message
+        stats_message = (
+            f"📊 *Group Statistics for {chat.title}*\n\n"
+            f"👥 *Members:* {member_count}\n"
+            f"⚠️ *Total Violations:* {total_violations}\n"
+            f"👤 *Users with Violations:* {users_with_violations}\n"
+            f"⏳ *Currently Temp-Banned:* {temp_banned_count}\n\n"
+            f"*Top Violators:*\n"
+        )
+
+        # Get top 5 violators
+        top_violators = sorted(violation_counts.items(), key=lambda x: x[1], reverse=True)[:5]
+        if top_violators:
+            for i, (user_id, count) in enumerate(top_violators, 1):
+                if count > 0:
+                    try:
+                        user = await context.bot.get_chat(int(user_id))
+                        username = user.username or f"User {user_id[-4:]}"
+                        stats_message += f"{i}. @{username}: {count} violations\n"
+                    except:
+                        stats_message += f"{i}. User {user_id[-4:]}: {count} violations\n"
+        else:
+            stats_message += "No violations recorded yet."
+
+        await update.message.reply_text(stats_message, parse_mode="Markdown")
+
+    except Exception as e:
+        logger.error(f"Error generating stats: {e}")
+        await update.message.reply_text("⚠️ Failed to generate group statistics.")
+
+
+def main() -> None:
+    """Start the bot."""
+    # Load existing violation data
+    load_violations()
+
+    # Create the Application
+    application = Application.builder().token(TELEGRAM_TOKEN).build()
+
+    # Add command handlers
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("rules", rules_command))
+    application.add_handler(CommandHandler("violations", violations_command))
+
+    # Add admin command handlers
+    application.add_handler(CommandHandler("ban", ban_command))
+    application.add_handler(CommandHandler("tempban", tempban_command))
+    application.add_handler(CommandHandler("unban", unban_command))
+    application.add_handler(CommandHandler("warn", warn_command))
+    application.add_handler(CommandHandler("unwarn", unwarn_command))
+    application.add_handler(CommandHandler("reset", reset_violations_command))
+    application.add_handler(CommandHandler("stats", stats_command))
+
+    # Add message handler
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
+    # Set up periodic job to check for expired bans (every 5 minutes)
+    job_queue = application.job_queue
+    job_queue.run_repeating(check_and_enforce_bans, interval=300)
+
+    # Run the bot until the user presses Ctrl-C
+    application.run_polling()
+
+
+if __name__ == "__main__":
+    if not TELEGRAM_TOKEN or not OPENAI_API_KEY or not ASSISTANT_ID:
+        logger.error("Please set the TELEGRAM_TOKEN, OPENAI_API_KEY, and ASSISTANT_ID environment variables.")
+        exit(1)
+    main()

@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="en" data-bs-theme="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Telegram AI Bot Manager</title>
+    <link rel="stylesheet" href="https://cdn.replit.com/agent/bootstrap-agent-dark-theme.min.css">
+    <style>
+        .log-container {
+            height: 400px;
+            overflow-y: auto;
+            background-color: var(--bs-dark);
+            border-radius: 0.25rem;
+            padding: 10px;
+            font-family: monospace;
+        }
+        .log-line {
+            margin-bottom: 3px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container mt-4">
+        <div class="row">
+            <div class="col-12">
+                <div class="card mb-4">
+                    <div class="card-header">
+                        <h1 class="h3 mb-0">Telegram AI Bot Manager</h1>
+                    </div>
+                    <div class="card-body">
+                        <p class="card-text">This dashboard lets you control your Telegram bot with AI moderation capabilities.</p>
+                        
+                        {% with messages = get_flashed_messages(with_categories=true) %}
+                            {% if messages %}
+                                {% for category, message in messages %}
+                                    <div class="alert alert-{{ category }}">{{ message }}</div>
+                                {% endfor %}
+                            {% endif %}
+                        {% endwith %}
+                        
+                        <div class="row mb-4">
+                            <div class="col-md-6">
+                                <div class="card">
+                                    <div class="card-header">
+                                        <h5 class="card-title mb-0">Bot Status</h5>
+                                    </div>
+                                    <div class="card-body">
+                                        <div class="d-flex align-items-center mb-3">
+                                            <div class="me-3">
+                                                <span class="badge {% if bot_status == 'running' %}bg-success{% else %}bg-danger{% endif %} p-2">
+                                                    {{ bot_status|capitalize }}
+                                                </span>
+                                            </div>
+                                            <div class="btn-group" role="group">
+                                                <form action="{{ url_for('start_bot') }}" method="post" class="me-2">
+                                                    <button type="submit" class="btn btn-success" {% if bot_status == 'running' %}disabled{% endif %}>
+                                                        <i class="bi bi-play-fill"></i> Start Bot
+                                                    </button>
+                                                </form>
+                                                <form action="{{ url_for('stop_bot') }}" method="post">
+                                                    <button type="submit" class="btn btn-danger" {% if bot_status != 'running' %}disabled{% endif %}>
+                                                        <i class="bi bi-stop-fill"></i> Stop Bot
+                                                    </button>
+                                                </form>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="col-md-6">
+                                <div class="card">
+                                    <div class="card-header">
+                                        <h5 class="card-title mb-0">Configuration Status</h5>
+                                    </div>
+                                    <div class="card-body">
+                                        <ul class="list-group">
+                                            <li class="list-group-item d-flex justify-content-between align-items-center">
+                                                TELEGRAM_TOKEN
+                                                <span class="badge {% if secrets_status.TELEGRAM_TOKEN %}bg-success{% else %}bg-danger{% endif %} rounded-pill">
+                                                    {% if secrets_status.TELEGRAM_TOKEN %}✓{% else %}✗{% endif %}
+                                                </span>
+                                            </li>
+                                            <li class="list-group-item d-flex justify-content-between align-items-center">
+                                                OPENAI_API_KEY
+                                                <span class="badge {% if secrets_status.OPENAI_API_KEY %}bg-success{% else %}bg-danger{% endif %} rounded-pill">
+                                                    {% if secrets_status.OPENAI_API_KEY %}✓{% else %}✗{% endif %}
+                                                </span>
+                                            </li>
+                                            <li class="list-group-item d-flex justify-content-between align-items-center">
+                                                ASSISTANT_ID
+                                                <span class="badge {% if secrets_status.ASSISTANT_ID %}bg-success{% else %}bg-danger{% endif %} rounded-pill">
+                                                    {% if secrets_status.ASSISTANT_ID %}✓{% else %}✗{% endif %}
+                                                </span>
+                                            </li>
+                                        </ul>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div class="card mb-4">
+                            <div class="card-header d-flex justify-content-between align-items-center">
+                                <h5 class="card-title mb-0">Bot Output</h5>
+                                <button id="refreshOutput" class="btn btn-sm btn-secondary">
+                                    <i class="bi bi-arrow-clockwise"></i> Refresh
+                                </button>
+                            </div>
+                            <div class="card-body p-0">
+                                <div class="log-container" id="logContainer">
+                                    {% if bot_output %}
+                                        {% for line in bot_output %}
+                                            <div class="log-line">{{ line }}</div>
+                                        {% endfor %}
+                                    {% else %}
+                                        <div class="log-line text-muted">No output available. Start the bot to see logs.</div>
+                                    {% endif %}
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div class="card">
+                            <div class="card-header">
+                                <h5 class="card-title mb-0">Help & Instructions</h5>
+                            </div>
+                            <div class="card-body">
+                                <h6>Bot Features:</h6>
+                                <ul>
+                                    <li>AI Assistant: Responds to questions and queries in Telegram</li>
+                                    <li>Content Moderation: Automatically moderates group chat messages</li>
+                                    <li>Rule Enforcement: Handles violations according to defined rules</li>
+                                </ul>
+                                
+                                <h6>Admin Commands:</h6>
+                                <ul>
+                                    <li><code>/ban @username [reason]</code> - Ban user permanently</li>
+                                    <li><code>/tempban @username [hours] [reason]</code> - Ban for specific hours</li>
+                                    <li><code>/unban @username</code> - Unban a user</li>
+                                    <li><code>/warn @username [reason]</code> - Add violation to user</li>
+                                    <li><code>/unwarn @username</code> - Remove one violation</li>
+                                    <li><code>/reset @username</code> - Reset all violations</li>
+                                    <li><code>/stats</code> - Show group statistics</li>
+                                </ul>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            const logContainer = document.getElementById('logContainer');
+            const refreshButton = document.getElementById('refreshOutput');
+            
+            // Auto scroll to bottom of logs
+            function scrollToBottom() {
+                logContainer.scrollTop = logContainer.scrollHeight;
+            }
+            
+            scrollToBottom();
+            
+            // Refresh output
+            refreshButton.addEventListener('click', function() {
+                fetch('/bot_status')
+                    .then(response => response.json())
+                    .then(data => {
+                        // Update log display
+                        logContainer.innerHTML = '';
+                        if (data.output && data.output.length > 0) {
+                            data.output.forEach(line => {
+                                const logLine = document.createElement('div');
+                                logLine.className = 'log-line';
+                                logLine.textContent = line;
+                                logContainer.appendChild(logLine);
+                            });
+                        } else {
+                            const logLine = document.createElement('div');
+                            logLine.className = 'log-line text-muted';
+                            logLine.textContent = 'No output available. Start the bot to see logs.';
+                            logContainer.appendChild(logLine);
+                        }
+                        scrollToBottom();
+                    })
+                    .catch(error => {
+                        console.error('Error refreshing output:', error);
+                    });
+            });
+            
+            // Auto refresh every 5 seconds if bot is running
+            setInterval(function() {
+                if (document.querySelector('.badge.bg-success')) {
+                    refreshButton.click();
+                }
+            }, 5000);
+        });
+    </script>
+</body>
+</html>
