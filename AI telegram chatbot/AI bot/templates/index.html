@@ -7,188 +7,246 @@
     <link rel="stylesheet" href="https://cdn.replit.com/agent/bootstrap-agent-dark-theme.min.css">
     <style>
         .log-container {
-            height: 400px;
+            height: 300px;
             overflow-y: auto;
             background-color: var(--bs-dark);
             border-radius: 0.25rem;
             padding: 10px;
             font-family: monospace;
+            font-size: 0.85rem;
         }
         .log-line {
             margin-bottom: 3px;
         }
+        .badge-icon {
+            width: 28px;
+            height: 28px;
+            font-size: 1rem;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            border-radius: 50%;
+        }
     </style>
 </head>
 <body>
-    <div class="container mt-4">
-        <div class="row">
-            <div class="col-12">
-                <div class="card mb-4">
-                    <div class="card-header">
-                        <h1 class="h3 mb-0">Telegram AI Bot Manager</h1>
+    <div class="container mt-4 mb-5">
+
+        <div class="card mb-4">
+            <div class="card-header">
+                <h1 class="h3 mb-0">Telegram AI Bot Manager</h1>
+            </div>
+            <div class="card-body">
+                <p class="card-text text-muted">Control your Telegram bot with AI moderation capabilities.</p>
+
+                {% with messages = get_flashed_messages(with_categories=true) %}
+                    {% if messages %}
+                        {% for category, message in messages %}
+                            <div class="alert alert-{{ category }} alert-dismissible fade show" role="alert">
+                                {{ message }}
+                                <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+                            </div>
+                        {% endfor %}
+                    {% endif %}
+                {% endwith %}
+            </div>
+        </div>
+
+        <!-- Configuration Form -->
+        <div class="card mb-4">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <h5 class="mb-0">API Configuration</h5>
+                <span class="badge {% if secrets_status.TELEGRAM_TOKEN and secrets_status.OPENAI_API_KEY and secrets_status.ASSISTANT_ID %}bg-success{% else %}bg-warning text-dark{% endif %}">
+                    {% if secrets_status.TELEGRAM_TOKEN and secrets_status.OPENAI_API_KEY and secrets_status.ASSISTANT_ID %}
+                        All Configured
+                    {% else %}
+                        Incomplete
+                    {% endif %}
+                </span>
+            </div>
+            <div class="card-body">
+                <p class="text-muted small mb-3">Enter your API credentials below. Values are saved to the <code>.env</code> file and loaded immediately. Leave a field blank to keep the existing value.</p>
+                <form action="{{ url_for('save_config') }}" method="post">
+                    <div class="mb-3">
+                        <label for="telegram_token" class="form-label d-flex align-items-center gap-2">
+                            Telegram Bot Token
+                            <span class="badge-icon {% if secrets_status.TELEGRAM_TOKEN %}bg-success{% else %}bg-danger{% endif %}">
+                                {% if secrets_status.TELEGRAM_TOKEN %}✓{% else %}✗{% endif %}
+                            </span>
+                        </label>
+                        <input type="password" class="form-control" id="telegram_token" name="telegram_token"
+                               placeholder="{% if secrets_status.TELEGRAM_TOKEN %}Already set — enter new value to update{% else %}Paste your Telegram bot token from BotFather{% endif %}">
+                        <div class="form-text">Get this from <a href="https://t.me/BotFather" target="_blank">@BotFather</a> on Telegram.</div>
                     </div>
-                    <div class="card-body">
-                        <p class="card-text">This dashboard lets you control your Telegram bot with AI moderation capabilities.</p>
-                        
-                        {% with messages = get_flashed_messages(with_categories=true) %}
-                            {% if messages %}
-                                {% for category, message in messages %}
-                                    <div class="alert alert-{{ category }}">{{ message }}</div>
-                                {% endfor %}
-                            {% endif %}
-                        {% endwith %}
-                        
-                        <div class="row mb-4">
-                            <div class="col-md-6">
-                                <div class="card">
-                                    <div class="card-header">
-                                        <h5 class="card-title mb-0">Bot Status</h5>
-                                    </div>
-                                    <div class="card-body">
-                                        <div class="d-flex align-items-center mb-3">
-                                            <div class="me-3">
-                                                <span class="badge {% if bot_status == 'running' %}bg-success{% else %}bg-danger{% endif %} p-2">
-                                                    {{ bot_status|capitalize }}
-                                                </span>
-                                            </div>
-                                            <div class="btn-group" role="group">
-                                                <form action="{{ url_for('start_bot') }}" method="post" class="me-2">
-                                                    <button type="submit" class="btn btn-success" {% if bot_status == 'running' %}disabled{% endif %}>
-                                                        <i class="bi bi-play-fill"></i> Start Bot
-                                                    </button>
-                                                </form>
-                                                <form action="{{ url_for('stop_bot') }}" method="post">
-                                                    <button type="submit" class="btn btn-danger" {% if bot_status != 'running' %}disabled{% endif %}>
-                                                        <i class="bi bi-stop-fill"></i> Stop Bot
-                                                    </button>
-                                                </form>
-                                            </div>
-                                        </div>
-                                    </div>
-                                </div>
-                            </div>
-                            <div class="col-md-6">
-                                <div class="card">
-                                    <div class="card-header">
-                                        <h5 class="card-title mb-0">Configuration Status</h5>
-                                    </div>
-                                    <div class="card-body">
-                                        <ul class="list-group">
-                                            <li class="list-group-item d-flex justify-content-between align-items-center">
-                                                TELEGRAM_TOKEN
-                                                <span class="badge {% if secrets_status.TELEGRAM_TOKEN %}bg-success{% else %}bg-danger{% endif %} rounded-pill">
-                                                    {% if secrets_status.TELEGRAM_TOKEN %}✓{% else %}✗{% endif %}
-                                                </span>
-                                            </li>
-                                            <li class="list-group-item d-flex justify-content-between align-items-center">
-                                                OPENAI_API_KEY
-                                                <span class="badge {% if secrets_status.OPENAI_API_KEY %}bg-success{% else %}bg-danger{% endif %} rounded-pill">
-                                                    {% if secrets_status.OPENAI_API_KEY %}✓{% else %}✗{% endif %}
-                                                </span>
-                                            </li>
-                                            <li class="list-group-item d-flex justify-content-between align-items-center">
-                                                ASSISTANT_ID
-                                                <span class="badge {% if secrets_status.ASSISTANT_ID %}bg-success{% else %}bg-danger{% endif %} rounded-pill">
-                                                    {% if secrets_status.ASSISTANT_ID %}✓{% else %}✗{% endif %}
-                                                </span>
-                                            </li>
-                                        </ul>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                        
-                        <div class="card mb-4">
-                            <div class="card-header d-flex justify-content-between align-items-center">
-                                <h5 class="card-title mb-0">Bot Output</h5>
-                                <button id="refreshOutput" class="btn btn-sm btn-secondary">
-                                    <i class="bi bi-arrow-clockwise"></i> Refresh
-                                </button>
-                            </div>
-                            <div class="card-body p-0">
-                                <div class="log-container" id="logContainer">
-                                    {% if bot_output %}
-                                        {% for line in bot_output %}
-                                            <div class="log-line">{{ line }}</div>
-                                        {% endfor %}
-                                    {% else %}
-                                        <div class="log-line text-muted">No output available. Start the bot to see logs.</div>
-                                    {% endif %}
-                                </div>
-                            </div>
-                        </div>
-                        
-                        <div class="card">
-                            <div class="card-header">
-                                <h5 class="card-title mb-0">Help & Instructions</h5>
-                            </div>
-                            <div class="card-body">
-                                <h6>Bot Features:</h6>
-                                <ul>
-                                    <li>AI Assistant: Responds to questions and queries in Telegram</li>
-                                    <li>Content Moderation: Automatically moderates group chat messages</li>
-                                    <li>Rule Enforcement: Handles violations according to defined rules</li>
-                                </ul>
-                                
-                                <h6>Admin Commands:</h6>
-                                <ul>
-                                    <li><code>/ban @username [reason]</code> - Ban user permanently</li>
-                                    <li><code>/tempban @username [hours] [reason]</code> - Ban for specific hours</li>
-                                    <li><code>/unban @username</code> - Unban a user</li>
-                                    <li><code>/warn @username [reason]</code> - Add violation to user</li>
-                                    <li><code>/unwarn @username</code> - Remove one violation</li>
-                                    <li><code>/reset @username</code> - Reset all violations</li>
-                                    <li><code>/stats</code> - Show group statistics</li>
-                                </ul>
-                            </div>
-                        </div>
+                    <div class="mb-3">
+                        <label for="openai_api_key" class="form-label d-flex align-items-center gap-2">
+                            OpenAI API Key
+                            <span class="badge-icon {% if secrets_status.OPENAI_API_KEY %}bg-success{% else %}bg-danger{% endif %}">
+                                {% if secrets_status.OPENAI_API_KEY %}✓{% else %}✗{% endif %}
+                            </span>
+                        </label>
+                        <input type="password" class="form-control" id="openai_api_key" name="openai_api_key"
+                               placeholder="{% if secrets_status.OPENAI_API_KEY %}Already set — enter new value to update{% else %}sk-...{% endif %}">
+                        <div class="form-text">From <a href="https://platform.openai.com/api-keys" target="_blank">platform.openai.com/api-keys</a>.</div>
+                    </div>
+                    <div class="mb-3">
+                        <label for="assistant_id" class="form-label d-flex align-items-center gap-2">
+                            OpenAI Assistant ID
+                            <span class="badge-icon {% if secrets_status.ASSISTANT_ID %}bg-success{% else %}bg-danger{% endif %}">
+                                {% if secrets_status.ASSISTANT_ID %}✓{% else %}✗{% endif %}
+                            </span>
+                        </label>
+                        <input type="password" class="form-control" id="assistant_id" name="assistant_id"
+                               placeholder="{% if secrets_status.ASSISTANT_ID %}Already set — enter new value to update{% else %}asst_...{% endif %}">
+                        <div class="form-text">From the <a href="https://platform.openai.com/assistants" target="_blank">OpenAI Assistants page</a>.</div>
+                    </div>
+                    <button type="submit" class="btn btn-primary">Save Configuration</button>
+                </form>
+            </div>
+        </div>
+
+        <!-- Bot Control -->
+        <div class="row mb-4">
+            <div class="col-md-6 mb-3 mb-md-0">
+                <div class="card h-100">
+                    <div class="card-header">
+                        <h5 class="mb-0">Bot Control</h5>
+                    </div>
+                    <div class="card-body d-flex align-items-center gap-3">
+                        <span class="badge fs-6 {% if bot_status == 'running' %}bg-success{% else %}bg-danger{% endif %} px-3 py-2">
+                            {{ bot_status|capitalize }}
+                        </span>
+                        <form action="{{ url_for('start_bot') }}" method="post" class="d-inline">
+                            <button type="submit" class="btn btn-success" {% if bot_status == 'running' or not (secrets_status.TELEGRAM_TOKEN and secrets_status.OPENAI_API_KEY and secrets_status.ASSISTANT_ID) %}disabled{% endif %}>
+                                ▶ Start Bot
+                            </button>
+                        </form>
+                        <form action="{{ url_for('stop_bot') }}" method="post" class="d-inline">
+                            <button type="submit" class="btn btn-danger" {% if bot_status != 'running' %}disabled{% endif %}>
+                                ■ Stop Bot
+                            </button>
+                        </form>
+                    </div>
+                    {% if not (secrets_status.TELEGRAM_TOKEN and secrets_status.OPENAI_API_KEY and secrets_status.ASSISTANT_ID) %}
+                    <div class="card-footer text-warning small">
+                        ⚠ Save all API credentials above before starting the bot.
+                    </div>
+                    {% endif %}
+                </div>
+            </div>
+            <div class="col-md-6">
+                <div class="card h-100">
+                    <div class="card-header">
+                        <h5 class="mb-0">Configuration Status</h5>
+                    </div>
+                    <div class="card-body p-0">
+                        <ul class="list-group list-group-flush">
+                            <li class="list-group-item d-flex justify-content-between align-items-center">
+                                TELEGRAM_TOKEN
+                                <span class="badge {% if secrets_status.TELEGRAM_TOKEN %}bg-success{% else %}bg-danger{% endif %} rounded-pill px-3">
+                                    {% if secrets_status.TELEGRAM_TOKEN %}✓ Set{% else %}✗ Missing{% endif %}
+                                </span>
+                            </li>
+                            <li class="list-group-item d-flex justify-content-between align-items-center">
+                                OPENAI_API_KEY
+                                <span class="badge {% if secrets_status.OPENAI_API_KEY %}bg-success{% else %}bg-danger{% endif %} rounded-pill px-3">
+                                    {% if secrets_status.OPENAI_API_KEY %}✓ Set{% else %}✗ Missing{% endif %}
+                                </span>
+                            </li>
+                            <li class="list-group-item d-flex justify-content-between align-items-center">
+                                ASSISTANT_ID
+                                <span class="badge {% if secrets_status.ASSISTANT_ID %}bg-success{% else %}bg-danger{% endif %} rounded-pill px-3">
+                                    {% if secrets_status.ASSISTANT_ID %}✓ Set{% else %}✗ Missing{% endif %}
+                                </span>
+                            </li>
+                        </ul>
                     </div>
                 </div>
             </div>
         </div>
+
+        <!-- Bot Output -->
+        <div class="card mb-4">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <h5 class="mb-0">Bot Output</h5>
+                <button id="refreshOutput" class="btn btn-sm btn-secondary">↻ Refresh</button>
+            </div>
+            <div class="card-body p-2">
+                <div class="log-container" id="logContainer">
+                    {% if bot_output %}
+                        {% for line in bot_output %}
+                            <div class="log-line">{{ line }}</div>
+                        {% endfor %}
+                    {% else %}
+                        <div class="log-line text-muted">No output yet. Start the bot to see logs here.</div>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+
+        <!-- Help -->
+        <div class="card">
+            <div class="card-header">
+                <h5 class="mb-0">Help & Commands</h5>
+            </div>
+            <div class="card-body">
+                <h6>User Commands (in Telegram)</h6>
+                <ul>
+                    <li><code>/start</code> — Welcome message</li>
+                    <li><code>/help</code> — Show all commands</li>
+                    <li><code>/rules</code> — Display group rules</li>
+                    <li><code>/violations</code> — Check your violation count</li>
+                </ul>
+                <h6>Admin Commands</h6>
+                <ul>
+                    <li><code>/ban @username [reason]</code> — Permanently ban a user</li>
+                    <li><code>/tempban @username [hours] [reason]</code> — Temporarily ban a user</li>
+                    <li><code>/unban @username</code> — Unban a user</li>
+                    <li><code>/warn @username [reason]</code> — Add a violation</li>
+                    <li><code>/unwarn @username</code> — Remove a violation</li>
+                    <li><code>/reset @username</code> — Reset all violations</li>
+                    <li><code>/stats</code> — Show group statistics</li>
+                </ul>
+            </div>
+        </div>
+
     </div>
-    
+
     <script>
-        document.addEventListener('DOMContentLoaded', function() {
+        document.addEventListener('DOMContentLoaded', function () {
             const logContainer = document.getElementById('logContainer');
             const refreshButton = document.getElementById('refreshOutput');
-            
-            // Auto scroll to bottom of logs
+
             function scrollToBottom() {
                 logContainer.scrollTop = logContainer.scrollHeight;
             }
-            
             scrollToBottom();
-            
-            // Refresh output
-            refreshButton.addEventListener('click', function() {
+
+            refreshButton.addEventListener('click', function () {
                 fetch('/bot_status')
-                    .then(response => response.json())
+                    .then(r => r.json())
                     .then(data => {
-                        // Update log display
                         logContainer.innerHTML = '';
                         if (data.output && data.output.length > 0) {
                             data.output.forEach(line => {
-                                const logLine = document.createElement('div');
-                                logLine.className = 'log-line';
-                                logLine.textContent = line;
-                                logContainer.appendChild(logLine);
+                                const div = document.createElement('div');
+                                div.className = 'log-line';
+                                div.textContent = line;
+                                logContainer.appendChild(div);
                             });
                         } else {
-                            const logLine = document.createElement('div');
-                            logLine.className = 'log-line text-muted';
-                            logLine.textContent = 'No output available. Start the bot to see logs.';
-                            logContainer.appendChild(logLine);
+                            const div = document.createElement('div');
+                            div.className = 'log-line text-muted';
+                            div.textContent = 'No output yet. Start the bot to see logs here.';
+                            logContainer.appendChild(div);
                         }
                         scrollToBottom();
                     })
-                    .catch(error => {
-                        console.error('Error refreshing output:', error);
-                    });
+                    .catch(err => console.error('Error refreshing:', err));
             });
-            
-            // Auto refresh every 5 seconds if bot is running
-            setInterval(function() {
+
+            // Auto-refresh every 5s when bot is running
+            setInterval(function () {
                 if (document.querySelector('.badge.bg-success')) {
                     refreshButton.click();
                 }
